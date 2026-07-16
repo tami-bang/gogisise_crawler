@@ -146,7 +146,12 @@ class CrawlerService:
         await self.sync_category_tree_to_backend(nodes)
 
         # 3. 말단(Leaf) 노드만 추출하여 크롤링 수행 (depth=4가 최종 부위 노드)
-        leaf_nodes = [n for n in nodes if n.get("depth") == 4]
+        # 불필요한 서브 브랜드 카테고리 폭증을 방지하기 위해 표준 카테고리 접두사만 필터링합니다.
+        standard_prefixes = ["1301", "1302", "1401", "1402", "3101", "3102"]
+        leaf_nodes = [
+            n for n in nodes 
+            if n.get("depth") == 4 and any(n.get("ctgNo", "").startswith(p) for p in standard_prefixes)
+        ]
         
         log.info("start_full_crawl_dynamic", total_leaf_categories=len(leaf_nodes))
         

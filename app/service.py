@@ -11,7 +11,7 @@ log = structlog.get_logger()
 
 class CrawlerService:
     BASE_URL = "https://gw.ekcm.co.kr"
-    BACKEND_URL = os.getenv("FASTAPI_TO_BE_URL", "http://backend:3000")
+    BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://www.ekcm.co.kr/",

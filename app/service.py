@@ -96,9 +96,21 @@ class CrawlerService:
             if grd and grd not in valid_grades:
                 continue
 
+            # 1kg당 가격 계산 표준화
+            sale_price = item.get("salePrc", 0)
+            weight = item.get("useEnabWgt") or item.get("invtWgt")
+            price_per_kg = sale_price
+            if weight:
+                try:
+                    w_val = float(weight)
+                    if w_val > 0:
+                        price_per_kg = int(round(sale_price / w_val))
+                except:
+                    pass
+
             filtered.append({
                 "name": goods_nm,
-                "price": sale_price,
+                "price": price_per_kg,
                 "brand": brand_nm,
                 "detail_url": f"https://www.ekcm.co.kr/pd/productDetail?goodsNo={goods_no}&artcCd={artc_cd}",
                 "goodsNo": goods_no,
@@ -147,24 +159,33 @@ class CrawlerService:
                 
                 await asyncio.sleep(random.uniform(1, 3))
                 
-        # 최종 결과를 NestJS 백엔드(POST /crawler/ingest)로 전송
+        # 카테고리 1개씩 개별 요청으로 전송 (Vercel 30초 타임아웃 회피)
         await self.ingest_to_backend(results)
         
         return results
 
     async def ingest_to_backend(self, results: List[Dict[str, Any]]):
-        """분석 완료된 데이터를 NestJS BE로 잉제스트합니다."""
+        """분석 완료된 데이터를 NestJS BE로 잉제스트합니다. (카테고리별 개별 전송)"""
         url = f"{self.BACKEND_URL}/crawler/ingest"
         log.info("ingesting_to_backend", url=url, total_categories_crawled=len(results))
         
+        success_count = 0
+        fail_count = 0
+        
         async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(url, json={"data": results}, timeout=30.0)
-                response.raise_for_status()
-                log.info("ingest_success", status=response.status_code)
-            except Exception as e:
-                log.error("ingest_failed", error=str(e))
-                # 실패 시 어떻게 처리할지는 정책에 따라 결정 (DLQ 등)
+            for result in results:
+                try:
+                    # 카테고리 1개씩 전송 (Vercel 30s timeout 회피)
+                    response = await client.post(url, json={"data": [result]}, timeout=60.0)
+                    response.raise_for_status()
+                    success_count += 1
+                    log.info("ingest_category_success", category=result.get("category_path"), status=response.status_code)
+                    await asyncio.sleep(0.5)  # 서버 과부하 방지
+                except Exception as e:
+                    fail_count += 1
+                    log.error("ingest_category_failed", category=result.get("category_path"), error=str(e))
+        
+        log.info("ingest_complete", success=success_count, failed=fail_count)
 
     async def peek_metadata(self) -> Dict[str, Any]:
         """peek_metadata: 임시 구현. 필요시 fetch_goods_list로 건수 반환"""

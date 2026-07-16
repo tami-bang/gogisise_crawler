@@ -133,36 +133,53 @@ class CrawlerService:
     async def run_full_crawl(self) -> List[Dict[str, Any]]:
         """전체 카테고리에 대해 매핑을 기반으로 크롤링과 분석을 수행합니다."""
         results = []
-        category_map = CategoryMap()
         
-        # 국내산 돈육 크롤링
-        for storage, categories in category_map.pork.items():
-            for cat_name, ctg_no in categories.items():
-                category_path = f"국내산 돈육 > {storage} > {cat_name}"
-                log.info("start_crawling", category=category_path, ctg_no=ctg_no)
-                
-                items = await self.fetch_goods_list(ctg_no)
-                analyzed_result = self.process_and_analyze(category_path, items)
-                results.append(analyzed_result)
-                
-                await asyncio.sleep(random.uniform(1, 3))
+        # 1. 카테고리 트리 동적 조회 (Geumcheonmit API로부터 직접 트리 구조 fetch)
+        try:
+            from app.scraper import fetch_category_tree
+            nodes = fetch_category_tree()
+        except Exception as e:
+            log.error("fetch_category_tree_failed", error=str(e))
+            return []
 
-        # 국내산 한우 크롤링
-        for storage, categories in category_map.hanwoo.items():
-            for cat_name, ctg_no in categories.items():
-                category_path = f"국내산 한우 > {storage} > {cat_name}"
-                log.info("start_crawling", category=category_path, ctg_no=ctg_no)
-                
-                items = await self.fetch_goods_list(ctg_no)
+        # 2. 백엔드에 카테고리 트리 동기화 요청
+        await self.sync_category_tree_to_backend(nodes)
+
+        # 3. 말단(Leaf) 노드만 추출하여 크롤링 수행 (depth=4가 최종 부위 노드)
+        leaf_nodes = [n for n in nodes if n.get("depth") == 4]
+        
+        log.info("start_full_crawl_dynamic", total_leaf_categories=len(leaf_nodes))
+        
+        for idx, node in enumerate(leaf_nodes):
+            ctg_no = node["ctgNo"]
+            category_path = node["path"]
+            
+            log.info("start_crawling", index=idx+1, total=len(leaf_nodes), category=category_path, ctg_no=ctg_no)
+            
+            items = await self.fetch_goods_list(ctg_no)
+            if items:
                 analyzed_result = self.process_and_analyze(category_path, items)
                 results.append(analyzed_result)
-                
-                await asyncio.sleep(random.uniform(1, 3))
-                
-        # 카테고리 1개씩 개별 요청으로 전송 (Vercel 30초 타임아웃 회피)
+            
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            
+        # 4. 분석 완료된 상품 리스트를 백엔드로 개별 인입
         await self.ingest_to_backend(results)
         
         return results
+
+    async def sync_category_tree_to_backend(self, nodes: List[Dict[str, Any]]):
+        """카테고리 트리 데이터를 백엔드로 전송하여 동기화합니다."""
+        url = f"{self.BACKEND_URL}/crawler/category-tree"
+        log.info("sync_category_tree_to_backend", url=url, nodes_count=len(nodes))
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, json={"categories": nodes}, timeout=30.0)
+                response.raise_for_status()
+                log.info("sync_category_tree_success", status=response.status_code)
+            except Exception as e:
+                log.error("sync_category_tree_failed", error=str(e))
 
     async def ingest_to_backend(self, results: List[Dict[str, Any]]):
         """분석 완료된 데이터를 NestJS BE로 잉제스트합니다. (카테고리별 개별 전송)"""

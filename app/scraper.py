@@ -186,6 +186,56 @@ def _http_post(url: str, payload: dict, timeout: int = 15) -> Any:
 # 금천미트 API 메서드
 # ────────────────────────────────────────────────────────────
 
+def fetch_category_tree() -> List[Dict[str, Any]]:
+    """
+    전체 카테고리 계층 구조를 트리 노드 리스트 형태로 반환
+    GET /api/display/v1/displayCategory/getDispCtgList
+    """
+    url = f"{BASE_URL}/api/display/v1/displayCategory/getDispCtgList?shopInfwYn=Y"
+    resp = _http_get(url)
+
+    nodes = []
+
+    def _traverse(node: Any, parent_no: Optional[str] = None, depth: int = 1, current_path: str = "") -> None:
+        if isinstance(node, dict):
+            no = node.get("dispCtgNo") or node.get("leafCtgNo") or node.get("ctgNo")
+            name = node.get("dispCtgNm") or node.get("ctgNm") or ""
+            
+            if not no or not name:
+                return
+
+            ctg_no_str = str(no)
+            path_str = f"{current_path} > {name}" if current_path else name
+
+            # 14 (한우 암소), 31 (돈육), 13 (한우 거세)만 하위 트리 포함
+            # 탑 레벨은 10 (국내산 한우), 30 (국내산 돈육)
+            if depth == 1:
+                if ctg_no_str not in ["10", "30"]:
+                    return
+            elif depth == 2:
+                if ctg_no_str not in ["13", "14", "31"]:
+                    return
+
+            nodes.append({
+                "ctgNo": ctg_no_str,
+                "name": name,
+                "parentNo": parent_no,
+                "depth": depth,
+                "path": path_str
+            })
+
+            children = node.get("childList") or node.get("children") or []
+            if children:
+                for child in children:
+                    _traverse(child, ctg_no_str, depth + 1, path_str)
+        elif isinstance(node, list):
+            for item in node:
+                _traverse(item, parent_no, depth, current_path)
+
+    _traverse(resp)
+    return nodes
+
+
 def fetch_categories() -> List[str]:
     """
     전체 카테고리 번호(dispCtgNo) 목록 반환

@@ -80,8 +80,10 @@ class CrawlerService:
                             error=str(e),
                         )
                         await asyncio.sleep(random.uniform(1, 3))
-                else:
-                    break
+                        if attempt == 2:
+                            raise RuntimeError(
+                                f"금천미트 상품 API 최종 실패: category={ctg_no}, page={page_no}"
+                            ) from e
 
                 if not page_items:
                     break
@@ -197,12 +199,10 @@ class CrawlerService:
         results = []
         
         # 1. 카테고리 트리 동적 조회 (Geumcheonmit API로부터 직접 트리 구조 fetch)
-        try:
-            from app.scraper import fetch_category_tree
-            nodes = fetch_category_tree()
-        except Exception as e:
-            log.error("fetch_category_tree_failed", error=str(e))
-            return []
+        from app.scraper import fetch_category_tree
+        nodes = fetch_category_tree()
+        if not nodes:
+            raise RuntimeError("금천미트 카테고리 트리가 비어 있습니다.")
 
         # 2. 백엔드에 카테고리 트리 동기화 요청
         await self.sync_category_tree_to_backend(nodes)
@@ -243,12 +243,16 @@ class CrawlerService:
         log.info("sync_category_tree_to_backend", url=url, nodes_count=len(nodes))
         
         async with httpx.AsyncClient() as client:
+            response = None
             try:
                 response = await client.post(url, json={"categories": nodes}, timeout=30.0)
                 response.raise_for_status()
-                log.info("sync_category_tree_success", status=response.status_code)
             except Exception as e:
-                log.error("sync_category_tree_failed", error=str(e))
+                response_text = response.text[:1000] if response is not None else None
+                log.critical("sync_category_tree_failed", error=str(e), response=response_text)
+                raise RuntimeError("카테고리 트리 동기화 실패") from e
+
+        log.info("sync_category_tree_success", status=response.status_code)
 
     async def ingest_to_backend(self, results: List[Dict[str, Any]]):
         """분석 완료된 데이터를 NestJS BE로 잉제스트합니다. (카테고리별 개별 전송)"""
@@ -256,10 +260,10 @@ class CrawlerService:
         log.info("ingesting_to_backend", url=url, total_categories_crawled=len(results))
         
         success_count = 0
-        fail_count = 0
         
         async with httpx.AsyncClient() as client:
             for result in results:
+                response = None
                 try:
                     # 카테고리 1개씩 전송 (Vercel 30s timeout 회피)
                     response = await client.post(url, json={"data": [result]}, timeout=60.0)
@@ -268,10 +272,18 @@ class CrawlerService:
                     log.info("ingest_category_success", category=result.get("category_path"), status=response.status_code)
                     await asyncio.sleep(0.5)  # 서버 과부하 방지
                 except Exception as e:
-                    fail_count += 1
-                    log.error("ingest_category_failed", category=result.get("category_path"), error=str(e))
+                    response_text = response.text[:1000] if response is not None else None
+                    log.critical(
+                        "ingest_category_failed",
+                        category=result.get("category_path"),
+                        error=str(e),
+                        response=response_text,
+                    )
+                    raise RuntimeError(
+                        f"백엔드 상품 인입 실패: {result.get('category_path')}"
+                    ) from e
         
-        log.info("ingest_complete", success=success_count, failed=fail_count)
+        log.info("ingest_complete", success=success_count, failed=0)
 
     async def peek_metadata(self) -> Dict[str, Any]:
         """peek_metadata: 임시 구현. 필요시 fetch_goods_list로 건수 반환"""

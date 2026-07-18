@@ -282,9 +282,7 @@ def fetch_categories() -> List[str]:
     _extract(resp)
 
     if not ctg_nos:
-        logger.warning("카테고리 목록이 비어있습니다. 알려진 카테고리로 폴백합니다.")
-        # 알려진 카테고리 번호 폴백
-        ctg_nos = ["140101", "140201", "310101", "310201"]
+        raise RuntimeError("카테고리 API 응답에 말단 카테고리가 없습니다.")
 
     # [USER REQUEST] "국내산 한우 암소" (14) 및 "국내산 돈육" (31) 카테고리만 수집하여 속도 최적화
     filtered_ctg_nos = [c for c in ctg_nos if c.startswith("14") or c.startswith("31")]
@@ -528,8 +526,8 @@ class GeumcheonScraper:
                 items, has_more = fetch_goods_page(ctg_no, page=page, page_size=self.page_size)
             except RuntimeError as e:
                 # [Rule 1] 3회 모두 실패 → 해당 카테고리 skip
-                logger.error("[Rule1] 카테고리 %s 페이지 %d 수집 포기: %s", ctg_no, page, e)
-                break
+                logger.critical("[Rule1] 카테고리 %s 페이지 %d 수집 실패: %s", ctg_no, page, e)
+                raise
 
             for item in items:
                 record = map_item_to_record(item, collected_at)
@@ -563,12 +561,9 @@ class GeumcheonScraper:
         errors: List[str] = []
 
         # 카테고리 목록 조회
-        try:
-            ctg_nos = fetch_categories()
-        except RuntimeError as e:
-            logger.critical("[Rule1] 카테고리 목록 조회 실패: %s", e)
-            errors.append(str(e))
-            ctg_nos = ["130101", "130201", "130301", "130401"]
+        ctg_nos = fetch_categories()
+        if not ctg_nos:
+            raise RuntimeError("수집할 카테고리가 없습니다.")
 
         for idx, ctg_no in enumerate(ctg_nos):
             logger.info("[%d/%d] 카테고리 %s 수집 시작...", idx + 1, len(ctg_nos), ctg_no)
@@ -580,8 +575,8 @@ class GeumcheonScraper:
                 all_records.extend(records)
             except Exception as e:
                 msg = f"카테고리 {ctg_no} 예외: {e}"
-                logger.error("[Rule1] %s", msg)
-                errors.append(msg)
+                logger.critical("[Rule1] %s", msg)
+                raise RuntimeError(msg) from e
 
             # [Rule 2] 카테고리 간 속도 제한
             if idx < len(ctg_nos) - 1:
@@ -621,8 +616,8 @@ class GeumcheonScraper:
         try:
             items, _ = fetch_goods_page(ctg_no, page=1, page_size=10)
         except RuntimeError as e:
-            logger.error("테스트 수집 실패: %s", e)
-            return [], 0
+            logger.critical("테스트 수집 실패: %s", e)
+            raise
 
         records, skipped = [], 0
         for item in items:
@@ -637,12 +632,7 @@ class GeumcheonScraper:
         전체 카테고리의 총 상품 개수(totalCount)를 가져와 딕셔너리로 반환.
         예: {'130101': 150, '130201': 45, ...}
         """
-        try:
-            # 카테고리 목록부터 가져오기 (이미 fetch_categories 존재)
-            ctg_nos = fetch_categories()
-        except Exception as e:
-            logger.error("카테고리 조회 실패: %s", e)
-            return {}
+        ctg_nos = fetch_categories()
 
         counts = {}
         for ctg_no in ctg_nos:
@@ -678,8 +668,8 @@ class GeumcheonScraper:
                     
                     counts[ctg_no] = int(tot_cnt) if tot_cnt is not None else 0
             except Exception as e:
-                logger.warning("카테고리 %s 카운트 조회 실패: %s", ctg_no, e)
-                counts[ctg_no] = 0
+                logger.critical("카테고리 %s 카운트 조회 실패: %s", ctg_no, e)
+                raise RuntimeError(f"카테고리 메타데이터 조회 실패: {ctg_no}") from e
 
             # Rate Limit 적용 (안전하게 0.3초 대기)
             time.sleep(0.3)

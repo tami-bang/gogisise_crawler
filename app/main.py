@@ -50,17 +50,28 @@ async def redis_worker():
                             await redis.xack(STREAM_NAME, group_name, msg_id)
                             log.info("task_completed", msg_id=msg_id)
                         except Exception as inner_e:
-                            log.error("task_failed", msg_id=msg_id, error=str(inner_e))
+                            log.critical("task_failed", msg_id=msg_id, error=str(inner_e))
+                            raise
         except asyncio.CancelledError:
             break
         except Exception as e:
-            log.error("worker_error", error=str(e))
-            await asyncio.sleep(5)
+            log.critical("worker_fatal_error", error=str(e))
+            raise
 
 @app.on_event("startup")
 async def on_startup():
     log.info("fastapi_startup", env=os.getenv("ENV", "dev"))
-    asyncio.create_task(redis_worker())
+    worker_task = asyncio.create_task(redis_worker())
+
+    def terminate_on_worker_failure(task: asyncio.Task):
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            log.critical("worker_process_terminated", error=str(error))
+            os._exit(1)
+
+    worker_task.add_done_callback(terminate_on_worker_failure)
 
 @app.get("/health")
 async def health():

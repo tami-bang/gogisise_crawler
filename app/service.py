@@ -21,16 +21,15 @@ class CrawlerService:
     }
 
     async def fetch_goods_list(self, ctg_no: str) -> List[Dict]:
-        """특정 카테고리의 상품 리스트를 가져옵니다."""
+        """특정 카테고리의 모든 페이지 상품 리스트를 가져옵니다."""
         url = f"{self.BASE_URL}/api/goods/v1/goods/dispGoodsList"
-        payload = {
+        base_payload = {
             "dispCtgNoList": [ctg_no],
             "brandNoList": [], "lsprdGrdCdList": [], "homeCdList": [],
             "ppYmdList": [], "strgMthdGbCdList": [], "workMethTypCdList": [],
             "deliProcTypCdList": [], "recomBkindList": [], "qualityList": [],
             "insfatGrdList": [], "mffldList": [], "estNoList": [],
             "sortTpCd": "10",
-            "pageNo": 1,
             "pageSize": 100,
             "aplyPsbMediaCd": "01",
             "curCtgNo": ctg_no,
@@ -38,30 +37,63 @@ class CrawlerService:
             "mbrNo": "",
         }
         
+        all_items: List[Dict] = []
+        page_no = 1
+
         async with httpx.AsyncClient(headers=self.HEADERS, verify=False) as client:
-            for attempt in range(3):
-                try:
-                    response = await client.post(url, json=payload, timeout=15.0)
-                    response.raise_for_status()
-                    
-                    # API 응답 구조체 파싱 (기존 API 스키마 참고)
-                    res_data = response.json()
-                    payload_data = res_data.get("payload", [])
-                    if isinstance(payload_data, dict):
-                        items = (
-                            payload_data.get("list")
-                            or payload_data.get("items")
-                            or payload_data.get("goodsList")
-                            or []
+            while True:
+                page_items: List[Dict] = []
+                total_count = 0
+
+                for attempt in range(3):
+                    try:
+                        payload = {**base_payload, "pageNo": page_no}
+                        response = await client.post(url, json=payload, timeout=15.0)
+                        response.raise_for_status()
+
+                        payload_data = response.json().get("payload", [])
+                        if isinstance(payload_data, dict):
+                            page_items = (
+                                payload_data.get("list")
+                                or payload_data.get("items")
+                                or payload_data.get("goodsList")
+                                or []
+                            )
+                            total_count = int(
+                                payload_data.get("totCnt")
+                                or payload_data.get("totalCount")
+                                or 0
+                            )
+                        elif isinstance(payload_data, list):
+                            page_items = payload_data
+
+                        if page_items and not total_count:
+                            total_count = int(page_items[0].get("totCnt") or 0)
+                        break
+                    except Exception as e:
+                        log.error(
+                            "api_call_failed",
+                            attempt=attempt,
+                            ctg_no=ctg_no,
+                            page_no=page_no,
+                            error=str(e),
                         )
-                        return items
-                    elif isinstance(payload_data, list):
-                        return payload_data
-                    return []
-                except Exception as e:
-                    log.error("api_call_failed", attempt=attempt, ctg_no=ctg_no, error=str(e))
-                    await asyncio.sleep(random.uniform(1, 3))
-        return []
+                        await asyncio.sleep(random.uniform(1, 3))
+                else:
+                    break
+
+                if not page_items:
+                    break
+
+                all_items.extend(page_items)
+                if total_count and len(all_items) >= total_count:
+                    break
+                if not total_count and len(page_items) < base_payload["pageSize"]:
+                    break
+
+                page_no += 1
+
+        return all_items
 
     def process_and_analyze(self, category_path: str, items: List[Dict]) -> Dict[str, Any]:
         """가져온 상품 리스트를 필터링하고 통계를 산출합니다."""

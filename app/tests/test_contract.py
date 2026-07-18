@@ -3,7 +3,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from models import BulkPayload, RawRecord
+from app.models import BulkPayload, RawRecord
 
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
@@ -16,7 +16,9 @@ def valid_record(**overrides):
         "pricePerKg": 38000,
         "species": "BEEF",
         "storageType": "CHILLED",
-        "grade": "1+",
+        "category": "안심",
+        "brand": "금천한우",
+        "qualityGrade": "1+",
         "ageMonths": 28,
     }
     values.update(overrides)
@@ -39,7 +41,7 @@ class RawRecordContractTests(unittest.TestCase):
 
     def test_rejects_string_pricePerKg(self):
         with self.assertRaises(ValidationError):
-            valid_record(pricePerKg=10000, brand="test", category="test", "38000")
+            valid_record(pricePerKg="38000")
 
     def test_rejects_pork_age(self):
         with self.assertRaises(ValidationError):

@@ -26,7 +26,7 @@ _SSL_CTX.verify_mode = ssl.CERT_NONE
 
 from pydantic import ValidationError
 
-from models import CrawlResult, RawRecord, ScrapeOutcome
+from app.models import CrawlResult, RawRecord, ScrapeOutcome
 
 # ────────────────────────────────────────────────────────────
 # 로거 설정

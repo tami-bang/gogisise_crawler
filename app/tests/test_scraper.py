@@ -1,7 +1,7 @@
 import datetime
 import unittest
 
-from scraper import map_item_to_record
+from app.scraper import map_item_to_record
 
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
@@ -22,7 +22,7 @@ class ItemMappingTests(unittest.TestCase):
             COLLECTED_AT,
         )
         self.assertIsNotNone(record)
-        self.assertEqual(record.price, 38000)
+        self.assertEqual(record.pricePerKg, 38000)
         self.assertEqual(record.rawProductName, "금천한우/냉장/안심")
 
     def test_skips_missing_required_source_field(self):
@@ -49,7 +49,7 @@ class ItemMappingTests(unittest.TestCase):
             COLLECTED_AT,
         )
         self.assertIsNotNone(record)
-        self.assertIsNone(record.ageInMonths)
+        self.assertIsNone(record.ageMonths)
 
 
 if __name__ == "__main__":

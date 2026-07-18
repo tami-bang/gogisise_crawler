@@ -108,6 +108,7 @@ class CrawlerService:
             grd = item.get("lsprdGrdNm", "") or item.get("grd", "")
             age = item.get("monthOfAge", None) or item.get("age", None)
             mfg_ymd = item.get("ppYmd", "") or item.get("mfgYmd", "")
+            expiry_ymd = item.get("useByYmd", "") or item.get("exprYmd", "") or item.get("expYmd", "")
             
             # 필터링 조건 로직
             # 1. 월령이 있을 경우 40개월 미만 (None인 경우 돼지고기이거나 데이터 누락)
@@ -132,10 +133,12 @@ class CrawlerService:
             sale_price = item.get("salePrc", 0)
             weight = item.get("useEnabWgt") or item.get("invtWgt")
             price_per_kg = sale_price
+            weight_kg = None
             if weight:
                 try:
                     w_val = float(weight)
                     if w_val > 0:
+                        weight_kg = w_val
                         price_per_kg = int(round(sale_price / w_val))
                 except:
                     pass
@@ -146,7 +149,14 @@ class CrawlerService:
                 "brand": brand_nm,
                 "detail_url": f"https://www.ekcm.co.kr/pd/productDetail?goodsNo={goods_no}&artcCd={artc_cd}",
                 "goodsNo": goods_no,
-                "metadata": {"age": age_int if age_int else None, "mfg_date": mfg_ymd}
+                "metadata": {
+                    "age": age_int if age_int else None,
+                    "grade": grd or None,
+                    "mfg_date": mfg_ymd,
+                    "expiry_date": expiry_ymd,
+                    "weight_kg": weight_kg,
+                    "sale_price": sale_price or None,
+                }
             })
 
         # 통계 계산

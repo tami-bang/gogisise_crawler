@@ -2,6 +2,8 @@ import httpx
 import asyncio
 import random
 import os
+import json
+from pathlib import Path
 from typing import List, Dict, Any
 import statistics
 import re
@@ -20,6 +22,32 @@ class CrawlerService:
         "Accept": "application/json",
         "Accept-Language": "ko-KR,ko;q=0.9",
     }
+    INGEST_CHUNK_SIZE = 50
+    INGEST_MAX_RETRIES = 3
+    CHECKPOINT_PATH = Path(os.getenv("CRAWLER_CHECKPOINT_PATH", "checkpoint.json"))
+
+    def _load_checkpoint(self) -> set[str]:
+        if not self.CHECKPOINT_PATH.exists():
+            return set()
+
+        try:
+            payload = json.loads(self.CHECKPOINT_PATH.read_text(encoding="utf-8"))
+            completed = payload.get("completedCategoryIds", [])
+            if not isinstance(completed, list) or not all(isinstance(value, str) for value in completed):
+                raise ValueError("completedCategoryIds must be a string array")
+            return set(completed)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(f"체크포인트 파일을 읽을 수 없습니다: {self.CHECKPOINT_PATH}") from exc
+
+    def _save_checkpoint(self, completed_category_ids: set[str]) -> None:
+        self.CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.CHECKPOINT_PATH.with_suffix(self.CHECKPOINT_PATH.suffix + ".tmp")
+        payload = {"completedCategoryIds": sorted(completed_category_ids)}
+        temporary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, self.CHECKPOINT_PATH)
 
     async def fetch_goods_list(self, ctg_no: str) -> List[Dict]:
         """특정 카테고리의 모든 페이지 상품 리스트를 가져옵니다."""
@@ -197,6 +225,7 @@ class CrawlerService:
     async def run_full_crawl(self) -> List[Dict[str, Any]]:
         """전체 카테고리에 대해 매핑을 기반으로 크롤링과 분석을 수행합니다."""
         results = []
+        completed_category_ids = self._load_checkpoint()
         
         # 1. 카테고리 트리 동적 조회 (Geumcheonmit API로부터 직접 트리 구조 fetch)
         from app.scraper import fetch_category_tree
@@ -222,6 +251,10 @@ class CrawlerService:
         for idx, node in enumerate(leaf_nodes):
             ctg_no = node["ctgNo"]
             category_path = node["path"]
+
+            if ctg_no in completed_category_ids:
+                log.info("skip_checkpointed_category", category=category_path, ctg_no=ctg_no)
+                continue
             
             log.info("start_crawling", index=idx+1, total=len(leaf_nodes), category=category_path, ctg_no=ctg_no)
             
@@ -229,12 +262,14 @@ class CrawlerService:
             if items:
                 analyzed_result = self.process_and_analyze(category_path, items)
                 results.append(analyzed_result)
+                await self.ingest_to_backend([analyzed_result])
+
+            completed_category_ids.add(ctg_no)
+            self._save_checkpoint(completed_category_ids)
+            log.info("category_checkpoint_saved", category=category_path, ctg_no=ctg_no)
             
             await asyncio.sleep(random.uniform(0.5, 1.5))
             
-        # 4. 분석 완료된 상품 리스트를 백엔드로 개별 인입
-        await self.ingest_to_backend(results)
-        
         return results
 
     async def sync_category_tree_to_backend(self, nodes: List[Dict[str, Any]]):
@@ -255,7 +290,7 @@ class CrawlerService:
         log.info("sync_category_tree_success", status=response.status_code)
 
     async def ingest_to_backend(self, results: List[Dict[str, Any]]):
-        """분석 완료된 데이터를 NestJS BE로 잉제스트합니다. (카테고리별 개별 전송)"""
+        """상품을 50개씩 전송하며 일시적 장애만 제한적으로 재시도합니다."""
         url = f"{self.BACKEND_URL}/crawler/ingest"
         log.info("ingesting_to_backend", url=url, total_categories_crawled=len(results))
         
@@ -263,25 +298,72 @@ class CrawlerService:
         
         async with httpx.AsyncClient() as client:
             for result in results:
-                response = None
-                try:
-                    # 카테고리 1개씩 전송 (Vercel 30s timeout 회피)
-                    response = await client.post(url, json={"data": [result]}, timeout=60.0)
-                    response.raise_for_status()
-                    success_count += 1
-                    log.info("ingest_category_success", category=result.get("category_path"), status=response.status_code)
-                    await asyncio.sleep(0.5)  # 서버 과부하 방지
-                except Exception as e:
-                    response_text = response.text[:1000] if response is not None else None
-                    log.critical(
-                        "ingest_category_failed",
-                        category=result.get("category_path"),
-                        error=str(e),
-                        response=response_text,
-                    )
-                    raise RuntimeError(
-                        f"백엔드 상품 인입 실패: {result.get('category_path')}"
-                    ) from e
+                items = result.get("items", [])
+                chunks = [
+                    items[offset:offset + self.INGEST_CHUNK_SIZE]
+                    for offset in range(0, len(items), self.INGEST_CHUNK_SIZE)
+                ] or [[]]
+
+                for chunk_index, chunk in enumerate(chunks, start=1):
+                    chunk_result = {**result, "items": chunk}
+                    for retry_count in range(self.INGEST_MAX_RETRIES + 1):
+                        response = None
+                        try:
+                            response = await client.post(
+                                url,
+                                json={"data": [chunk_result]},
+                                timeout=60.0,
+                            )
+                            response.raise_for_status()
+                            log.info(
+                                "ingest_chunk_success",
+                                category=result.get("category_path"),
+                                chunk=chunk_index,
+                                total_chunks=len(chunks),
+                                item_count=len(chunk),
+                                status=response.status_code,
+                            )
+                            break
+                        except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+                            retryable = True
+                            error = exc
+                        except httpx.HTTPStatusError as exc:
+                            retryable = exc.response.status_code in (502, 504)
+                            error = exc
+                        except Exception as exc:
+                            retryable = False
+                            error = exc
+
+                        if not retryable or retry_count == self.INGEST_MAX_RETRIES:
+                            response_text = response.text[:1000] if response is not None else None
+                            log.critical(
+                                "ingest_chunk_failed",
+                                category=result.get("category_path"),
+                                chunk=chunk_index,
+                                retry_count=retry_count,
+                                error=str(error),
+                                response=response_text,
+                            )
+                            raise RuntimeError(
+                                f"백엔드 상품 인입 실패: {result.get('category_path')} "
+                                f"chunk={chunk_index}/{len(chunks)}"
+                            ) from error
+
+                        delay_seconds = 2 ** retry_count
+                        log.warning(
+                            "retry_ingest_chunk",
+                            category=result.get("category_path"),
+                            chunk=chunk_index,
+                            retry=retry_count + 1,
+                            delay_seconds=delay_seconds,
+                            error=str(error),
+                        )
+                        await asyncio.sleep(delay_seconds)
+
+                    await asyncio.sleep(0.5)
+
+                success_count += 1
+                log.info("ingest_category_success", category=result.get("category_path"))
         
         log.info("ingest_complete", success=success_count, failed=0)
 

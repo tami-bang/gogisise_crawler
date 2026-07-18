@@ -4,6 +4,7 @@ import random
 import os
 from typing import List, Dict, Any
 import statistics
+import re
 import structlog
 from app.models import CategoryMap
 
@@ -106,44 +107,59 @@ class CrawlerService:
             goods_no = item.get("goodsNo", "")
             artc_cd = item.get("artcCd", "")
             grd = item.get("lsprdGrdNm", "") or item.get("grd", "")
-            age = item.get("monthOfAge", None) or item.get("age", None)
+            age = item.get("mage") or item.get("monthOfAge") or item.get("age")
             mfg_ymd = item.get("ppYmd", "") or item.get("mfgYmd", "")
             expiry_ymd = item.get("useByYmd", "") or item.get("exprYmd", "") or item.get("expYmd", "")
             storage_type = {"1": "CHILLED", "2": "FROZEN"}.get(str(item.get("strgMthdGbCd") or ""))
-            species = "PORK" if "돈" in str(item.get("lsspeNm") or "") else "BEEF"
+            species_name = str(item.get("lsspeNm") or "")
+            species = "PORK" if "돈" in species_name else "BEEF" if "한우" in species_name else None
+
+            goods_no = str(goods_no).strip() if goods_no is not None else ""
+            if not goods_no or not storage_type or not species:
+                continue
             
             # 필터링 조건 로직
-            # 1. 월령이 있을 경우 40개월 미만 (None인 경우 돼지고기이거나 데이터 누락)
-            age_int = 0
+            # 한우 월령은 1~40개월, 한돈 월령은 NULL로 정규화한다.
+            age_int = None
             if age:
                 try:
                     age_int = int(age)
-                except:
-                    pass
-                    
-            if age_int and age_int >= 40:
+                except (TypeError, ValueError):
+                    age_int = None
+
+            if species == "BEEF" and (age_int is None or not 1 <= age_int <= 40):
                 continue
+            if species == "PORK":
+                age_int = None
                 
             # 2. 등급 조건 필터링 (1++, 1+, 1)
             # 조건이 명확히 명시된 경우 필터, 안된 경우 패스 
             # (만약 한우의 경우에만 등급이 필수라면, 한우인지 체크도 필요할 수 있음)
-            valid_grades = ["1++", "1+", "1", "1등급", "1+등급", "1++등급", "A", "B", "C"]
-            if grd and grd not in valid_grades:
+            grade_match = re.search(r"1\+\+|1\+|1", str(grd))
+            normalized_grade = grade_match.group(0) if grade_match else None
+            if species == "BEEF" and normalized_grade is None:
                 continue
 
             # 1kg당 가격 계산 표준화
-            sale_price = item.get("salePrc", 0)
+            try:
+                sale_price = int(str(item.get("salePrc") or "").replace(",", ""))
+            except (TypeError, ValueError):
+                continue
             weight = item.get("useEnabWgt") or item.get("invtWgt")
-            price_per_kg = sale_price
             weight_kg = None
             if weight:
                 try:
-                    w_val = float(weight)
+                    w_val = float(str(weight).replace(",", ""))
                     if w_val > 0:
                         weight_kg = w_val
-                        price_per_kg = int(round(sale_price / w_val))
-                except:
-                    pass
+                except (TypeError, ValueError):
+                    weight_kg = None
+            if sale_price <= 0 or weight_kg is None:
+                continue
+
+            price_per_kg = int(round(sale_price / weight_kg))
+            if price_per_kg <= 0:
+                continue
 
             filtered.append({
                 "name": goods_nm,
@@ -152,8 +168,8 @@ class CrawlerService:
                 "detail_url": f"https://www.ekcm.co.kr/pd/productDetail?goodsNo={goods_no}&artcCd={artc_cd}",
                 "goodsNo": goods_no,
                 "metadata": {
-                    "age": age_int if age_int else None,
-                    "grade": grd or None,
+                    "age": age_int,
+                    "grade": normalized_grade,
                     "mfg_date": mfg_ymd,
                     "expiry_date": expiry_ymd,
                     "weight_kg": weight_kg,

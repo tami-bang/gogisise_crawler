@@ -109,6 +109,8 @@ class CrawlerService:
             age = item.get("monthOfAge", None) or item.get("age", None)
             mfg_ymd = item.get("ppYmd", "") or item.get("mfgYmd", "")
             expiry_ymd = item.get("useByYmd", "") or item.get("exprYmd", "") or item.get("expYmd", "")
+            storage_type = {"1": "CHILLED", "2": "FROZEN"}.get(str(item.get("strgMthdGbCd") or ""))
+            species = "PORK" if "돈" in str(item.get("lsspeNm") or "") else "BEEF"
             
             # 필터링 조건 로직
             # 1. 월령이 있을 경우 40개월 미만 (None인 경우 돼지고기이거나 데이터 누락)
@@ -156,6 +158,8 @@ class CrawlerService:
                     "expiry_date": expiry_ymd,
                     "weight_kg": weight_kg,
                     "sale_price": sale_price or None,
+                    "species": species,
+                    "storage_type": storage_type,
                 }
             })
 
@@ -187,12 +191,14 @@ class CrawlerService:
         # 2. 백엔드에 카테고리 트리 동기화 요청
         await self.sync_category_tree_to_backend(nodes)
 
-        # 3. 말단(Leaf) 노드만 추출하여 크롤링 수행 (depth=4가 최종 부위 노드)
-        # 불필요한 서브 브랜드 카테고리 폭증을 방지하기 위해 표준 카테고리 접두사만 필터링합니다.
-        standard_prefixes = ["1301", "1302", "1401", "1402", "3101", "3102"]
+        # 한우 암소와 한돈의 모든 브랜드/부위 말단 카테고리를 수집한다.
         leaf_nodes = [
             n for n in nodes 
-            if n.get("depth") == 4 and any(n.get("ctgNo", "").startswith(p) for p in standard_prefixes)
+            if n.get("leafYn") == "Y"
+            and (
+                "국내산 한우 암소" in n.get("path", "")
+                or "국내산 돈육" in n.get("path", "")
+            )
         ]
         
         log.info("start_full_crawl_dynamic", total_leaf_categories=len(leaf_nodes))

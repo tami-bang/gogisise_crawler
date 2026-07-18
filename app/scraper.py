@@ -196,6 +196,25 @@ def fetch_category_tree() -> List[Dict[str, Any]]:
 
     nodes = []
 
+    # 현재 금천미트 API는 전체 노드를 평면 배열로 반환한다.
+    if isinstance(resp, list):
+        for item in resp:
+            no = item.get("dispCtgNo") or item.get("leafCtgNo") or item.get("ctgNo")
+            name = item.get("dispCtgNm") or item.get("ctgNm") or ""
+            path_str = item.get("pathNm") or name
+            if not no or not name:
+                continue
+
+            nodes.append({
+                "ctgNo": str(no),
+                "name": name,
+                "parentNo": item.get("uprDispCtgNo") or item.get("uprTopDispCtgNo"),
+                "depth": int(item.get("depth") or 1),
+                "path": path_str,
+                "leafYn": item.get("leafYn"),
+            })
+        return nodes
+
     def _traverse(node: Any, parent_no: Optional[str] = None, depth: int = 1, current_path: str = "") -> None:
         if isinstance(node, dict):
             no = node.get("dispCtgNo") or node.get("leafCtgNo") or node.get("ctgNo")

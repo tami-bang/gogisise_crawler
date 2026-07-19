@@ -164,7 +164,9 @@ class CrawlerService:
                 continue
             
             # 필터링 조건 로직
-            # 한우 월령은 1~40개월, 한돈 월령은 NULL로 정규화한다.
+            # 한우 월령은 값이 제공된 경우에만 1~40개월을 검증합니다.
+            # 알꼬리·스지처럼 개체 월령/등급을 제공하지 않는 부산물도 상품번호,
+            # 중량, 판매가가 유효하면 정상 판매 상품이므로 누락시키지 않습니다.
             age_int = None
             if age:
                 try:
@@ -172,18 +174,15 @@ class CrawlerService:
                 except (TypeError, ValueError):
                     age_int = None
 
-            if species == "BEEF" and (age_int is None or not 1 <= age_int <= 40):
+            if species == "BEEF" and age_int is not None and not 1 <= age_int <= 40:
                 continue
             if species == "PORK":
                 age_int = None
                 
-            # 2. 등급 조건 필터링 (1++, 1+, 1)
-            # 조건이 명확히 명시된 경우 필터, 안된 경우 패스 
-            # (만약 한우의 경우에만 등급이 필수라면, 한우인지 체크도 필요할 수 있음)
+            # 2. 등급이 존재하는 정육 상품은 1++, 1+, 1로 정규화합니다.
+            # 원천 등급이 '해당없음'인 한우 부산물은 NULL을 유지합니다.
             grade_match = re.search(r"1\+\+|1\+|1", str(grd))
             normalized_grade = grade_match.group(0) if grade_match else None
-            if species == "BEEF" and normalized_grade is None:
-                continue
 
             # 1kg당 가격 계산 표준화
             try:

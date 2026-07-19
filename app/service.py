@@ -26,23 +26,38 @@ class CrawlerService:
     INGEST_MAX_RETRIES = 3
     CHECKPOINT_PATH = Path(os.getenv("CRAWLER_CHECKPOINT_PATH", "checkpoint.json"))
 
-    def _load_checkpoint(self) -> set[str]:
+    def _load_checkpoint(self) -> Dict[str, List[str]]:
         if not self.CHECKPOINT_PATH.exists():
-            return set()
+            return {}
 
         try:
             payload = json.loads(self.CHECKPOINT_PATH.read_text(encoding="utf-8"))
-            completed = payload.get("completedCategoryIds", [])
-            if not isinstance(completed, list) or not all(isinstance(value, str) for value in completed):
-                raise ValueError("completedCategoryIds must be a string array")
-            return set(completed)
+            completed = payload.get("completedCategories")
+            if completed is None and "completedCategoryIds" in payload:
+                log.warning("legacy_checkpoint_ignored", path=str(self.CHECKPOINT_PATH))
+                return {}
+            if not isinstance(completed, dict):
+                raise ValueError("completedCategories must be an object")
+            if not all(
+                isinstance(category_id, str)
+                and isinstance(goods_nos, list)
+                and all(isinstance(goods_no, str) for goods_no in goods_nos)
+                for category_id, goods_nos in completed.items()
+            ):
+                raise ValueError("completedCategories values must be string arrays")
+            return completed
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             raise RuntimeError(f"체크포인트 파일을 읽을 수 없습니다: {self.CHECKPOINT_PATH}") from exc
 
-    def _save_checkpoint(self, completed_category_ids: set[str]) -> None:
+    def _save_checkpoint(self, completed_categories: Dict[str, List[str]]) -> None:
         self.CHECKPOINT_PATH.parent.mkdir(parents=True, exist_ok=True)
         temporary_path = self.CHECKPOINT_PATH.with_suffix(self.CHECKPOINT_PATH.suffix + ".tmp")
-        payload = {"completedCategoryIds": sorted(completed_category_ids)}
+        payload = {
+            "completedCategories": {
+                category_id: sorted(set(goods_nos))
+                for category_id, goods_nos in sorted(completed_categories.items())
+            }
+        }
         temporary_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -225,7 +240,7 @@ class CrawlerService:
     async def run_full_crawl(self) -> List[Dict[str, Any]]:
         """전체 카테고리에 대해 매핑을 기반으로 크롤링과 분석을 수행합니다."""
         results = []
-        completed_category_ids = self._load_checkpoint()
+        completed_categories = self._load_checkpoint()
         
         # 1. 카테고리 트리 동적 조회 (Geumcheonmit API로부터 직접 트리 구조 fetch)
         from app.scraper import fetch_category_tree
@@ -252,25 +267,76 @@ class CrawlerService:
             ctg_no = node["ctgNo"]
             category_path = node["path"]
 
-            if ctg_no in completed_category_ids:
+            if ctg_no in completed_categories:
                 log.info("skip_checkpointed_category", category=category_path, ctg_no=ctg_no)
                 continue
             
             log.info("start_crawling", index=idx+1, total=len(leaf_nodes), category=category_path, ctg_no=ctg_no)
             
             items = await self.fetch_goods_list(ctg_no)
-            if items:
-                analyzed_result = self.process_and_analyze(category_path, items)
+            analyzed_result = self.process_and_analyze(category_path, items)
+            if analyzed_result["items"]:
                 results.append(analyzed_result)
                 await self.ingest_to_backend([analyzed_result])
 
-            completed_category_ids.add(ctg_no)
-            self._save_checkpoint(completed_category_ids)
+            completed_categories[ctg_no] = [
+                item["goodsNo"] for item in analyzed_result["items"]
+            ]
+            self._save_checkpoint(completed_categories)
             log.info("category_checkpoint_saved", category=category_path, ctg_no=ctg_no)
             
             await asyncio.sleep(random.uniform(0.5, 1.5))
             
+        leaf_category_ids = {node["ctgNo"] for node in leaf_nodes}
+        if set(completed_categories) != leaf_category_ids:
+            raise RuntimeError("전체 카테고리 완료 전에는 단종 동기화를 실행할 수 없습니다.")
+
+        collected_goods_nos = sorted({
+            goods_no
+            for goods_nos in completed_categories.values()
+            for goods_no in goods_nos
+        })
+        await self.finalize_crawl(collected_goods_nos)
         return results
+
+    async def finalize_crawl(self, goods_nos: List[str]) -> None:
+        if not goods_nos:
+            raise RuntimeError("수집 상품 목록이 비어 있어 단종 동기화를 중단했습니다.")
+
+        url = f"{self.BACKEND_URL}/crawler/finalize"
+        async with httpx.AsyncClient() as client:
+            for retry_count in range(self.INGEST_MAX_RETRIES + 1):
+                response = None
+                try:
+                    response = await client.post(
+                        url,
+                        json={"goodsNos": goods_nos},
+                        timeout=60.0,
+                    )
+                    response.raise_for_status()
+                    log.info("crawl_finalize_success", goods_count=len(goods_nos))
+                    return
+                except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+                    retryable = True
+                    error = exc
+                except httpx.HTTPStatusError as exc:
+                    retryable = exc.response.status_code in (502, 504)
+                    error = exc
+                except Exception as exc:
+                    retryable = False
+                    error = exc
+
+                if not retryable or retry_count == self.INGEST_MAX_RETRIES:
+                    response_text = response.text[:1000] if response is not None else None
+                    log.critical(
+                        "crawl_finalize_failed",
+                        retry_count=retry_count,
+                        error=str(error),
+                        response=response_text,
+                    )
+                    raise RuntimeError("백엔드 단종 동기화 실패") from error
+
+                await asyncio.sleep(2 ** retry_count)
 
     async def sync_category_tree_to_backend(self, nodes: List[Dict[str, Any]]):
         """카테고리 트리 데이터를 백엔드로 전송하여 동기화합니다."""

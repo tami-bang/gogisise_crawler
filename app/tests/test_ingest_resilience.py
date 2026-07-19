@@ -88,12 +88,20 @@ class IngestResilienceTests(unittest.IsolatedAsyncioTestCase):
         service = CrawlerService()
         with tempfile.TemporaryDirectory() as directory:
             service.CHECKPOINT_PATH = Path(directory) / "checkpoint.json"
-            service._save_checkpoint({"200", "100"})
+            service._save_checkpoint({"200": ["G-2"], "100": ["G-1"]})
 
-            self.assertEqual(service._load_checkpoint(), {"100", "200"})
+            self.assertEqual(
+                service._load_checkpoint(),
+                {"100": ["G-1"], "200": ["G-2"]},
+            )
             self.assertEqual(
                 json.loads(service.CHECKPOINT_PATH.read_text(encoding="utf-8")),
-                {"completedCategoryIds": ["100", "200"]},
+                {
+                    "completedCategories": {
+                        "100": ["G-1"],
+                        "200": ["G-2"],
+                    }
+                },
             )
             self.assertFalse(Path(str(service.CHECKPOINT_PATH) + ".tmp").exists())
 

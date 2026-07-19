@@ -291,15 +291,22 @@ class CrawlerService:
         if set(completed_categories) != leaf_category_ids:
             raise RuntimeError("전체 카테고리 완료 전에는 단종 동기화를 실행할 수 없습니다.")
 
+        # 한국어 주석: 체크포인트에 카테고리별로 누적해 둔 상품번호를 하나의 전체
+        # 스냅샷 목록으로 합칩니다. 중간 재시작 시에도 이미 완료된 카테고리의
+        # goodsNo가 유실되지 않으므로 단순 메모리 리스트보다 안전합니다.
         collected_goods_nos = sorted({
             goods_no
             for goods_nos in completed_categories.values()
             for goods_no in goods_nos
         })
-        await self.finalize_crawl(collected_goods_nos)
+        # 한국어 주석: 594개 전체 카테고리 집합이 정확히 완료된 뒤에만 Vercel
+        # 운영 백엔드의 단종 동기화 API를 호출합니다. 일부 수집 결과로 ACTIVE
+        # 상품을 잘못 비활성화하는 상황을 위의 집합 일치 검사로 차단합니다.
+        await self.finalize_crawl_to_backend(collected_goods_nos)
         return results
 
-    async def finalize_crawl(self, goods_nos: List[str]) -> None:
+    async def finalize_crawl_to_backend(self, goods_nos: List[str]) -> None:
+        """전체 수집 스냅샷을 Vercel 백엔드로 보내 누락 상품을 단종 처리합니다."""
         if not goods_nos:
             raise RuntimeError("수집 상품 목록이 비어 있어 단종 동기화를 중단했습니다.")
 

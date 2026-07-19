@@ -1,5 +1,6 @@
 import httpx
 import asyncio
+import datetime
 import random
 import os
 import json
@@ -11,6 +12,20 @@ import structlog
 from app.models import CategoryMap
 
 log = structlog.get_logger()
+
+
+def normalize_source_date(value: Any) -> str | None:
+    """금천 API의 YYYYMMDD 날짜만 통과시키고 임의 날짜는 만들지 않습니다."""
+    if value is None:
+        return None
+    digits = "".join(character for character in str(value) if character.isdigit())
+    if len(digits) != 8:
+        return None
+    try:
+        datetime.datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return None
+    return digits
 
 class CrawlerService:
     BASE_URL = "https://gw.ekcm.co.kr"
@@ -144,6 +159,8 @@ class CrawlerService:
     def process_and_analyze(self, category_path: str, items: List[Dict]) -> Dict[str, Any]:
         """가져온 상품 리스트를 필터링하고 통계를 산출합니다."""
         filtered = []
+        manufactured_count = 0
+        expiry_count = 0
         for item in items:
             # 기본 데이터 추출
             goods_nm = item.get("goodsNm", "")
@@ -153,8 +170,18 @@ class CrawlerService:
             artc_cd = item.get("artcCd", "")
             grd = item.get("lsprdGrdNm", "") or item.get("grd", "")
             age = item.get("mage") or item.get("monthOfAge") or item.get("age")
-            mfg_ymd = item.get("ppYmd", "") or item.get("mfgYmd", "")
-            expiry_ymd = item.get("useByYmd", "") or item.get("exprYmd", "") or item.get("expYmd", "")
+            # 금천 상품 목록 API의 실제 원문 키입니다. 값이 없을 때 임의의
+            # 오늘 날짜를 만들지 않고 NULL로 보존해 데이터 오염을 막습니다.
+            mfg_ymd = normalize_source_date(
+                item.get("ppYmd") or item.get("mfgYmd") or item.get("manufYm")
+            )
+            expiry_ymd = normalize_source_date(
+                item.get("distriDlineYmd")
+                or item.get("useByYmd")
+                or item.get("exprYmd")
+                or item.get("expiryYmd")
+                or item.get("expYmd")
+            )
             storage_type = {"1": "CHILLED", "2": "FROZEN"}.get(str(item.get("strgMthdGbCd") or ""))
             species_name = str(item.get("lsspeNm") or "")
             species = "PORK" if "돈" in species_name else "BEEF" if "한우" in species_name else None
@@ -205,6 +232,11 @@ class CrawlerService:
             if price_per_kg <= 0:
                 continue
 
+            if mfg_ymd:
+                manufactured_count += 1
+            if expiry_ymd:
+                expiry_count += 1
+
             filtered.append({
                 "name": goods_nm,
                 "price": price_per_kg,
@@ -225,6 +257,15 @@ class CrawlerService:
 
         # 통계 계산
         prices = [i["price"] for i in filtered]
+        log.info(
+            "date_parsing_summary",
+            category=category_path,
+            total_items=len(filtered),
+            manufactured_at_count=manufactured_count,
+            expires_at_count=expiry_count,
+            missing_manufactured_at=len(filtered) - manufactured_count,
+            missing_expires_at=len(filtered) - expiry_count,
+        )
         return {
             "category_path": category_path,
             "statistics": {

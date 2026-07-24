@@ -240,7 +240,9 @@ def fetch_category_tree() -> List[Dict[str, Any]]:
                 "name": name,
                 "parentNo": parent_no,
                 "depth": depth,
-                "path": path_str
+                "path": path_str,
+                # 📌 한국어 주석: 백엔드 DTO(leafYn) 필수값 검증을 통과하기 위해 leafYn 값을 추가합니다.
+                "leafYn": item.get("leafYn", "N")
             })
 
             children = node.get("childList") or node.get("children") or []

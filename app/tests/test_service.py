@@ -1,6 +1,6 @@
 import unittest
 
-from app.service import CrawlerService
+from app.service import CrawlerService, is_sellable_item
 
 
 class CrawlerServiceItemTests(unittest.TestCase):
@@ -42,6 +42,35 @@ class CrawlerServiceItemTests(unittest.TestCase):
         )
 
         self.assertEqual(result["items"], [])
+
+    def test_rejects_sold_out_and_zero_stock_items(self):
+        base_item = {
+            "goodsNm": "금천한우암소안심",
+            "goodsNo": "SOLD-OUT",
+            "lsspeNm": "한우",
+            "strgMthdGbCd": "1",
+            "lsprdGrdNm": "1+",
+            "useEnabWgt": "3.0",
+            "salePrc": 300000,
+        }
+
+        for state in (
+            {"saleFnshYn": "Y"},
+            {"saleStatNm": "품절"},
+            {"saleStatCd": "20"},
+            {"itmSaleStatCd": "20"},
+            {"stkQty": 0, "nolmtInvtYn": "N"},
+            {"dispYn": "N"},
+        ):
+            with self.subTest(state=state):
+                result = CrawlerService().process_and_analyze(
+                    "국내산 한우,국내산 한우 암소,금천한우(암),안심",
+                    [{**base_item, **state}],
+                )
+                self.assertEqual(result["items"], [])
+
+    def test_allows_zero_stock_for_unlimited_inventory(self):
+        self.assertTrue(is_sellable_item({"stkQty": 0, "nolmtInvtYn": "Y"}))
 
 
 if __name__ == "__main__":

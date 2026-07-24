@@ -13,6 +13,9 @@ from app.models import CategoryMap
 
 log = structlog.get_logger()
 
+UNSELLABLE_LABELS = ("품절", "판매불가", "구매불가", "판매종료")
+SALE_STATUS_FIELDS = ("saleStatNm", "itmSaleStatNm", "soutCausNm")
+
 
 def normalize_source_date(value: Any) -> str | None:
     """금천 API의 YYYYMMDD 날짜만 통과시키고 임의 날짜는 만들지 않습니다."""
@@ -27,9 +30,42 @@ def normalize_source_date(value: Any) -> str | None:
         return None
     return digits
 
+
+def is_sellable_item(item: Dict[str, Any]) -> bool:
+    """금천 상품 목록 API가 표시하는 판매/재고 상태를 판정합니다."""
+    if str(item.get("saleFnshYn") or "").strip().upper() == "Y":
+        return False
+    if str(item.get("dispYn") or "").strip().upper() == "N":
+        return False
+
+    for field in SALE_STATUS_FIELDS:
+        label = str(item.get(field) or "").replace(" ", "")
+        if any(unsellable in label for unsellable in UNSELLABLE_LABELS):
+            return False
+
+    # 실제 응답에서 정상 판매 상태는 두 코드 모두 "10"이다. 필드가 제공된
+    # 경우에만 검사해 과거/축약 응답과의 호환성을 유지한다.
+    for field in ("saleStatCd", "itmSaleStatCd"):
+        value = item.get(field)
+        if value is not None and str(value).strip() != "10":
+            return False
+
+    # 무제한 재고 상품은 stkQty=0이어도 판매 가능하다.
+    if str(item.get("nolmtInvtYn") or "").strip().upper() != "Y":
+        stock = item.get("stkQty")
+        if stock is not None:
+            try:
+                if float(str(stock).replace(",", "")) <= 0:
+                    return False
+            except (TypeError, ValueError):
+                pass
+
+    return True
+
 class CrawlerService:
     BASE_URL = "https://gw.ekcm.co.kr"
-    BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+    # 💡 [한글 주석] 배포 환경 기준에 맞추어 Vercel 프로덕션 API 서버로 타겟 조정
+    BACKEND_URL = os.getenv("BACKEND_URL", "https://gogisise-be-ten.vercel.app")
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://www.ekcm.co.kr/",
@@ -161,7 +197,12 @@ class CrawlerService:
         filtered = []
         manufactured_count = 0
         expiry_count = 0
+        unsellable_count = 0
         for item in items:
+            if not is_sellable_item(item):
+                unsellable_count += 1
+                continue
+
             # 기본 데이터 추출
             goods_nm = item.get("goodsNm", "")
             sale_price = item.get("salePrc", 0)
@@ -265,6 +306,7 @@ class CrawlerService:
             expires_at_count=expiry_count,
             missing_manufactured_at=len(filtered) - manufactured_count,
             missing_expires_at=len(filtered) - expiry_count,
+            unsellable_count=unsellable_count,
         )
         return {
             "category_path": category_path,
@@ -339,16 +381,31 @@ class CrawlerService:
             for goods_nos in completed_categories.values()
             for goods_no in goods_nos
         })
-        # 한국어 주석: 594개 전체 카테고리 집합이 정확히 완료된 뒤에만 Vercel
-        # 운영 백엔드의 단종 동기화 API를 호출합니다. 일부 수집 결과로 ACTIVE
-        # 상품을 잘못 비활성화하는 상황을 위의 집합 일치 검사로 차단합니다.
-        await self.finalize_crawl_to_backend(collected_goods_nos)
+        # 💡 [한글 주석] 594개 전체 카테고리 집합이 정확히 완료된 뒤에만 Vercel
+        # 운영 백엔드의 단종 동기화 API를 호출합니다.
+        leaf_category_paths = sorted({
+            node["path"].strip()
+            for node in leaf_nodes
+            if node.get("ctgNo") in completed_categories
+            and isinstance(node.get("path"), str)
+            and node["path"].strip()
+        })
+        if len(leaf_category_paths) != len(leaf_category_ids):
+            raise RuntimeError("완료된 카테고리 경로가 누락되어 단종 동기화를 중단했습니다.")
+        await self.finalize_crawl_to_backend(collected_goods_nos, leaf_category_paths)
         return results
 
-    async def finalize_crawl_to_backend(self, goods_nos: List[str]) -> None:
+    async def finalize_crawl_to_backend(self, goods_nos: List[str], categories: List[str]) -> None:
         """전체 수집 스냅샷을 Vercel 백엔드로 보내 누락 상품을 단종 처리합니다."""
         if not goods_nos:
             raise RuntimeError("수집 상품 목록이 비어 있어 단종 동기화를 중단했습니다.")
+        categories = sorted({
+            category.strip()
+            for category in categories
+            if isinstance(category, str) and category.strip()
+        })
+        if not categories:
+            raise RuntimeError("방문 완료 카테고리가 비어 있어 단종 동기화를 중단했습니다.")
 
         url = f"{self.BACKEND_URL}/crawler/finalize"
         async with httpx.AsyncClient() as client:
@@ -357,11 +414,15 @@ class CrawlerService:
                 try:
                     response = await client.post(
                         url,
-                        json={"goodsNos": goods_nos},
+                        json={"goodsNos": goods_nos, "categories": categories},
                         timeout=60.0,
                     )
                     response.raise_for_status()
-                    log.info("crawl_finalize_success", goods_count=len(goods_nos))
+                    log.info(
+                        "crawl_finalize_success",
+                        goods_count=len(goods_nos),
+                        visited_categories_count=len(categories),
+                    )
                     return
                 except (httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
                     retryable = True
